@@ -1,18 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, and } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { projects } from "@/db/schema";
+import { updateProjectStatusSchema } from "@/lib/validators";
 
-const VALID_STATUSES = [
-  "new",
-  "draft_created",
-  "entered",
-  "confirmed",
-  "decline_draft",
-  "declined",
-  "expired",
-];
-
-// PUT /api/projects/:id/status - ステータス手動更新
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -23,29 +15,21 @@ export async function PUT(
   }
 
   const { id } = await params;
-  const body = (await request.json()) as { status: string };
-  const { status } = body;
-
-  if (!status || !VALID_STATUSES.includes(status)) {
-    return NextResponse.json(
-      { error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` },
-      { status: 400 }
-    );
+  const parsed = updateProjectStatusSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const now = new Date().toISOString();
-  const db = getDB();
+  const db = getDb();
+  const updated = await db
+    .update(projects)
+    .set({ status: parsed.data.status, updatedAt: new Date().toISOString() })
+    .where(and(eq(projects.id, id), eq(projects.userId, session.user.id)))
+    .returning({ id: projects.id, status: projects.status });
 
-  const result = await db
-    .prepare(
-      "UPDATE projects SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?"
-    )
-    .bind(status, now, id, session.user.id)
-    .run();
-
-  if (!result.meta.changes) {
+  if (updated.length === 0) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return NextResponse.json({ id, status });
+  return NextResponse.json(updated[0]);
 }

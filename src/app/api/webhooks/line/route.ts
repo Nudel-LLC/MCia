@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDB } from "@/lib/db";
+import { lineWebhookSchema } from "@/lib/validators";
 
-// POST /api/webhooks/line - LINE Webhook
 export async function POST(request: NextRequest) {
   const signature = request.headers.get("x-line-signature");
   if (!signature) {
@@ -10,16 +9,14 @@ export async function POST(request: NextRequest) {
 
   // TODO: Verify LINE signature with LINE_CHANNEL_SECRET
 
-  const body = (await request.json()) as { events?: Array<{ type: string; source: { userId: string } }> };
-  const events = body.events || [];
-  const db = getDB();
+  const parsed = lineWebhookSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
+  }
 
-  for (const event of events) {
+  for (const event of parsed.data.events) {
     if (event.type === "follow") {
-      // User added the LINE bot — link LINE user ID to MCia user
-      // This requires the user to have previously initiated LINE linking from the app
       const lineUserId = event.source.userId;
-
       // TODO: Look up pending LINE link tokens and associate
       console.log("LINE follow event from:", lineUserId);
     }

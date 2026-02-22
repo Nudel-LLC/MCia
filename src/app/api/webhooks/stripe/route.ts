@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDB } from "@/lib/db";
+import { eq } from "drizzle-orm";
+import { getDb } from "@/lib/db";
+import { users } from "@/db/schema";
+import { stripeWebhookSchema } from "@/lib/validators";
 
-// POST /api/webhooks/stripe - Stripe Webhook
 export async function POST(request: NextRequest) {
   const signature = request.headers.get("stripe-signature");
   if (!signature) {
@@ -10,33 +12,37 @@ export async function POST(request: NextRequest) {
 
   // TODO: Verify Stripe signature with STRIPE_WEBHOOK_SECRET
 
-  const body = (await request.json()) as { type: string; data: { object: { status: string; customer: string } } };
-  const { type, data } = body;
+  const parsed = stripeWebhookSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
+  }
 
-  const db = getDB();
+  const { type, data } = parsed.data;
+  const db = getDb();
+  const subscription = data.object;
 
   switch (type) {
     case "customer.subscription.created":
     case "customer.subscription.updated": {
-      const subscription = data.object;
       const status = subscription.status === "active" ? "active" : "inactive";
       await db
-        .prepare(
-          "UPDATE users SET subscription_status = ?, updated_at = ? WHERE stripe_customer_id = ?"
-        )
-        .bind(status, new Date().toISOString(), subscription.customer)
-        .run();
+        .update(users)
+        .set({
+          subscriptionStatus: status as "active" | "inactive",
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(users.stripeCustomerId, subscription.customer));
       break;
     }
 
     case "customer.subscription.deleted": {
-      const subscription = data.object;
       await db
-        .prepare(
-          "UPDATE users SET subscription_status = 'inactive', updated_at = ? WHERE stripe_customer_id = ?"
-        )
-        .bind(new Date().toISOString(), subscription.customer)
-        .run();
+        .update(users)
+        .set({
+          subscriptionStatus: "inactive",
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(users.stripeCustomerId, subscription.customer));
       break;
     }
   }

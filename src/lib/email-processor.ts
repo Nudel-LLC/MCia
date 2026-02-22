@@ -1,14 +1,27 @@
 /**
- * Email Processing Pipeline
- * Gmail Pub/Sub通知を受け取り、メール分類→案件解析→スケジュール確認→下書き作成を行う
+ * Email Processing Pipeline — Drizzle ORM 版
+ *
+ * Gmail Pub/Sub 通知を受け取り、以下のパイプラインを実行:
+ *   メール分類 → 案件解析 → スケジュール確認 → 下書き作成
  */
 
+import { eq, and, ne, lte, gte, isNotNull, notInArray, desc } from "drizzle-orm";
+import type { Database } from "./db";
+import {
+  users,
+  accounts,
+  agencies as agenciesTable,
+  projects,
+  emailClassifications,
+  emailTracking,
+  prHistory,
+} from "@/db/schema";
+import type { User, Project } from "@/db/schema";
 import { classifyEmail } from "./email-classifier";
 import { parseProjectEmail } from "./email-parser";
 import { generatePR } from "./pr-generator";
 import {
   checkScheduleConflicts,
-  findDeclineCandidates,
   type CalendarEvent,
 } from "./schedule-checker";
 import {
@@ -21,91 +34,67 @@ import {
   deleteCalendarEvent,
   refreshAccessToken,
 } from "./google-api";
-import { generateId } from "./ulid";
 
-interface ProcessingContext {
-  db: D1Database;
-  apiKey: string; // Anthropic API key
+/** パイプラインに必要な外部コンテキスト */
+export interface ProcessingContext {
+  db: Database;
+  apiKey: string;
   googleClientId: string;
   googleClientSecret: string;
 }
 
-interface UserRecord {
-  id: string;
-  email: string;
-  gmail_history_id: string;
-}
+// ============================================================
+// Main entry point
+// ============================================================
 
-/**
- * Gmail通知を受けてメール処理を開始
- */
 export async function processGmailNotification(
   ctx: ProcessingContext,
   emailAddress: string,
-  historyId: string
+  historyId: string,
 ) {
-  // Find the user by email
-  const user = await ctx.db
-    .prepare("SELECT * FROM users WHERE email = ?")
-    .bind(emailAddress)
-    .first<UserRecord>();
-
+  const user = await ctx.db.query.users.findFirst({
+    where: eq(users.email, emailAddress),
+  });
   if (!user) return;
 
-  // Get the user's Google access token from Auth.js accounts table
-  const account = await ctx.db
-    .prepare(
-      "SELECT access_token, refresh_token, expires_at FROM accounts WHERE \"userId\" = ? AND provider = 'google'"
-    )
-    .bind(user.id)
-    .first<{
-      access_token: string;
-      refresh_token: string;
-      expires_at: number;
-    }>();
-
+  const account = await ctx.db.query.accounts.findFirst({
+    where: and(eq(accounts.userId, user.id), eq(accounts.provider, "google")),
+    columns: { access_token: true, refresh_token: true, expires_at: true },
+  });
   if (!account?.refresh_token) return;
 
   // Refresh access token if needed
-  let accessToken = account.access_token;
+  let accessToken = account.access_token ?? "";
   if (!account.expires_at || Date.now() / 1000 > account.expires_at - 300) {
     const refreshed = await refreshAccessToken(
       ctx.googleClientId,
       ctx.googleClientSecret,
-      account.refresh_token
+      account.refresh_token,
     );
     accessToken = refreshed.access_token;
 
-    // Update the stored token
     await ctx.db
-      .prepare(
-        'UPDATE accounts SET access_token = ?, expires_at = ? WHERE "userId" = ? AND provider = \'google\''
-      )
-      .bind(
-        accessToken,
-        Math.floor(Date.now() / 1000) + refreshed.expires_in,
-        user.id
-      )
-      .run();
+      .update(accounts)
+      .set({
+        access_token: accessToken,
+        expires_at: Math.floor(Date.now() / 1000) + refreshed.expires_in,
+      })
+      .where(and(eq(accounts.userId, user.id), eq(accounts.provider, "google")));
   }
 
-  // Get email history since last check
-  if (!user.gmail_history_id) return;
+  if (!user.gmailHistoryId) return;
 
-  const history = await getGmailHistory(accessToken, user.gmail_history_id);
+  const history = await getGmailHistory(accessToken, user.gmailHistoryId);
 
-  // Update history ID
   await ctx.db
-    .prepare("UPDATE users SET gmail_history_id = ?, updated_at = ? WHERE id = ?")
-    .bind(historyId, new Date().toISOString(), user.id)
-    .run();
+    .update(users)
+    .set({ gmailHistoryId: historyId, updatedAt: new Date().toISOString() })
+    .where(eq(users.id, user.id));
 
   if (!history.history) return;
 
-  // Process new messages
   for (const record of history.history) {
     if (!record.messagesAdded) continue;
-
     for (const added of record.messagesAdded) {
       const messageId = added.message.id;
       const labelIds: string[] = added.message.labelIds || [];
@@ -119,26 +108,25 @@ export async function processGmailNotification(
   }
 }
 
-/**
- * 受信メールを処理
- */
+// ============================================================
+// 受信メール処理
+// ============================================================
+
 async function processIncomingEmail(
   ctx: ProcessingContext,
-  user: UserRecord,
+  user: User,
   accessToken: string,
-  messageId: string
+  messageId: string,
 ) {
-  // Check if already processed
-  const existing = await ctx.db
-    .prepare(
-      "SELECT id FROM email_classifications WHERE user_id = ? AND gmail_message_id = ?"
-    )
-    .bind(user.id, messageId)
-    .first();
-
+  const existing = await ctx.db.query.emailClassifications.findFirst({
+    where: and(
+      eq(emailClassifications.userId, user.id),
+      eq(emailClassifications.gmailMessageId, messageId),
+    ),
+    columns: { id: true },
+  });
   if (existing) return;
 
-  // Fetch the email
   const message = await getGmailMessage(accessToken, messageId);
   const headers = message.payload.headers;
   const from =
@@ -146,125 +134,86 @@ async function processIncomingEmail(
   const subject =
     headers.find((h: { name: string }) => h.name === "Subject")?.value || "";
 
-  // Step 1: Domain filter — check if from a registered agency
   const fromDomain = from.match(/@([^\s>]+)/)?.[1]?.toLowerCase();
   if (!fromDomain) return;
 
-  const agency = await ctx.db
-    .prepare(
-      "SELECT * FROM agencies WHERE user_id = ? AND email_domain = ?"
-    )
-    .bind(user.id, fromDomain)
-    .first<{ id: string; name: string }>();
+  const agency = await ctx.db.query.agencies.findFirst({
+    where: and(
+      eq(agenciesTable.userId, user.id),
+      eq(agenciesTable.emailDomain, fromDomain),
+    ),
+    columns: { id: true, name: true },
+  });
+  if (!agency) return;
 
-  if (!agency) return; // Not from a registered agency
-
-  // Decode email body
   const bodyData = extractEmailBody(message.payload);
-
-  // Step 2: AI classification
   const classification = await classifyEmail(ctx.apiKey, subject, bodyData);
 
-  // Save classification
-  const classificationId = generateId();
-  await ctx.db
-    .prepare(
-      "INSERT INTO email_classifications (id, user_id, gmail_message_id, from_address, subject, category, confidence, reason, processed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)"
-    )
-    .bind(
-      classificationId,
-      user.id,
-      messageId,
-      from,
+  const [saved] = await ctx.db
+    .insert(emailClassifications)
+    .values({
+      userId: user.id,
+      gmailMessageId: messageId,
+      fromAddress: from,
       subject,
-      classification.category,
-      classification.confidence,
-      classification.reason
-    )
-    .run();
+      category: classification.category,
+      confidence: classification.confidence,
+      reason: classification.reason,
+      processed: false,
+    })
+    .returning({ id: emailClassifications.id });
 
-  // Process based on category
   if (classification.category === "recruitment") {
-    await processRecruitmentEmail(
-      ctx,
-      user,
-      accessToken,
-      messageId,
-      subject,
-      bodyData,
-      agency,
-      classificationId
-    );
+    await processRecruitmentEmail(ctx, user, accessToken, messageId, subject, bodyData, agency);
   } else if (classification.category === "confirmation") {
-    await processConfirmationEmail(
-      ctx,
-      user,
-      accessToken,
-      messageId,
-      subject,
-      bodyData,
-      agency
-    );
+    await processConfirmationEmail(ctx, user, accessToken, subject, bodyData);
   }
 
-  // Mark classification as processed
   await ctx.db
-    .prepare("UPDATE email_classifications SET processed = 1 WHERE id = ?")
-    .bind(classificationId)
-    .run();
+    .update(emailClassifications)
+    .set({ processed: true })
+    .where(eq(emailClassifications.id, saved.id));
 }
 
-/**
- * 案件募集メールを処理（フロー1）
- */
+// ============================================================
+// 案件募集メール処理 (Flow 1)
+// ============================================================
+
 async function processRecruitmentEmail(
   ctx: ProcessingContext,
-  user: UserRecord,
+  user: User,
   accessToken: string,
   messageId: string,
   subject: string,
   body: string,
   agency: { id: string; name: string },
-  _classificationId: string
 ) {
-  // Parse project details
   const parsed = await parseProjectEmail(ctx.apiKey, subject, body);
-
-  // Create project record
-  const projectId = generateId();
   const now = new Date().toISOString();
 
-  await ctx.db
-    .prepare(
-      `INSERT INTO projects (id, user_id, agency_id, title, start_date, end_date, location, compensation, genre, requires_pr, status, source_email_id, raw_email_body, parsed_data, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      projectId,
-      user.id,
-      agency.id,
-      parsed.title,
-      parsed.startDate,
-      parsed.endDate,
-      parsed.location,
-      parsed.compensation,
-      parsed.genre,
-      parsed.requiresPr ? 1 : 0,
-      messageId,
-      body,
-      JSON.stringify(parsed),
-      now,
-      now
-    )
-    .run();
+  const [project] = await ctx.db
+    .insert(projects)
+    .values({
+      userId: user.id,
+      agencyId: agency.id,
+      title: parsed.title,
+      startDate: parsed.startDate,
+      endDate: parsed.endDate,
+      location: parsed.location,
+      compensation: parsed.compensation,
+      genre: parsed.genre,
+      requiresPr: parsed.requiresPr,
+      status: "new",
+      sourceEmailId: messageId,
+      rawEmailBody: body,
+      parsedData: JSON.stringify(parsed),
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
 
-  // Check schedule conflicts
-  const calendarData = await getCalendarEvents(
-    accessToken,
-    parsed.startDate,
-    parsed.endDate
-  );
-
+  // ── スケジュール重複チェック ──
+  const calendarData = await getCalendarEvents(accessToken, parsed.startDate, parsed.endDate);
   const calendarEvents: CalendarEvent[] = (calendarData.items || []).map(
     (item: Record<string, unknown>) => ({
       id: item.id,
@@ -272,347 +221,244 @@ async function processRecruitmentEmail(
       description: (item.description as string) || "",
       start:
         (item.start as Record<string, string>)?.date ||
-        (item.start as Record<string, string>)?.dateTime ||
-        "",
+        (item.start as Record<string, string>)?.dateTime || "",
       end:
         (item.end as Record<string, string>)?.date ||
-        (item.end as Record<string, string>)?.dateTime ||
-        "",
+        (item.end as Record<string, string>)?.dateTime || "",
       allDay: !!(item.start as Record<string, string>)?.date,
-    })
+    }),
   );
 
-  // Get MCia managed event IDs
-  const { results: mciaProjects } = await ctx.db
-    .prepare(
-      "SELECT id, status, calendar_event_id FROM projects WHERE user_id = ? AND calendar_event_id IS NOT NULL AND status NOT IN ('declined', 'expired')"
-    )
-    .bind(user.id)
-    .all<{ id: string; status: string; calendar_event_id: string }>();
+  const mciaProjects = await ctx.db
+    .select({ id: projects.id, status: projects.status, calendarEventId: projects.calendarEventId })
+    .from(projects)
+    .where(
+      and(
+        eq(projects.userId, user.id),
+        isNotNull(projects.calendarEventId),
+        notInArray(projects.status, ["declined", "expired"]),
+      ),
+    );
 
-  const mciaEventIds = new Set(
-    mciaProjects.map((p) => p.calendar_event_id)
-  );
+  const mciaEventIds = new Set(mciaProjects.map((p) => p.calendarEventId!));
   const mciaProjectMap = new Map(
-    mciaProjects.map((p) => [
-      p.calendar_event_id,
-      { id: p.id, status: p.status },
-    ])
+    mciaProjects.map((p) => [p.calendarEventId!, { id: p.id, status: p.status }]),
   );
 
-  // Get agency names for heuristic detection
-  const { results: agencies } = await ctx.db
-    .prepare("SELECT name FROM agencies WHERE user_id = ?")
-    .bind(user.id)
-    .all<{ name: string }>();
-  const agencyNames = agencies.map((a) => a.name);
+  const userAgencies = await ctx.db
+    .select({ name: agenciesTable.name })
+    .from(agenciesTable)
+    .where(eq(agenciesTable.userId, user.id));
+  const agencyNames = userAgencies.map((a) => a.name);
 
   const conflict = checkScheduleConflicts(
-    parsed.startDate,
-    parsed.endDate,
-    calendarEvents,
-    mciaEventIds,
-    mciaProjectMap,
-    agencyNames
+    parsed.startDate, parsed.endDate, calendarEvents, mciaEventIds, mciaProjectMap, agencyNames,
   );
 
   if (conflict.conflictType === "confirmed_block") {
-    // Confirmed schedule conflict — skip entry
-    await ctx.db
-      .prepare("UPDATE projects SET status = 'expired', updated_at = ? WHERE id = ?")
-      .bind(now, projectId)
-      .run();
-    // TODO: Send LINE notification (entry_ng)
+    await ctx.db.update(projects).set({ status: "expired", updatedAt: now }).where(eq(projects.id, project.id));
     return;
   }
 
-  // Create entry draft email
-  const trackingTag = generateId();
+  // ── PR 生成 ──
   let prText: string | null = null;
-
-  // Generate PR if required
   if (parsed.requiresPr) {
-    const { results: pastProjects } = await ctx.db
-      .prepare(
-        "SELECT p.title, p.genre, p.start_date, p.location, ph.was_successful FROM pr_history ph JOIN projects p ON ph.project_id = p.id WHERE ph.user_id = ? AND p.genre = ? ORDER BY ph.was_successful DESC, p.start_date DESC LIMIT 5"
-      )
-      .bind(user.id, parsed.genre)
-      .all<{
-        title: string;
-        genre: string;
-        start_date: string;
-        location: string;
-        was_successful: number;
-      }>();
+    const pastData = await ctx.db
+      .select({
+        title: projects.title,
+        genre: projects.genre,
+        startDate: projects.startDate,
+        location: projects.location,
+        wasSuccessful: prHistory.wasSuccessful,
+      })
+      .from(prHistory)
+      .innerJoin(projects, eq(prHistory.projectId, projects.id))
+      .where(and(eq(prHistory.userId, user.id), eq(projects.genre, parsed.genre ?? "")))
+      .orderBy(desc(projects.startDate))
+      .limit(5);
 
     prText = await generatePR(
       ctx.apiKey,
-      {
-        title: parsed.title,
-        genre: parsed.genre,
-        location: parsed.location,
-      },
-      pastProjects.map((p) => ({
+      { title: parsed.title, genre: parsed.genre, location: parsed.location },
+      pastData.map((p) => ({
         title: p.title,
-        genre: p.genre,
-        startDate: p.start_date,
+        genre: p.genre ?? "",
+        startDate: p.startDate,
         location: p.location,
-        wasSuccessful: p.was_successful === 1,
-      }))
+        wasSuccessful: !!p.wasSuccessful,
+      })),
     );
   }
 
-  // Build entry email body
+  // ── 下書き作成 ──
   const entryBody = buildEntryEmailBody(parsed.title, agency.name, prText);
+  const fromAddress = `info@${agency.name}`;
 
-  // Create draft in Gmail
-  const fromAddress = `info@${agency.name}`; // Will be the agency's reply-to address
   const draft = await createGmailDraft(
-    accessToken,
-    fromAddress,
-    `エントリー希望 - ${parsed.title}`,
-    entryBody,
-    trackingTag
+    accessToken, fromAddress, `エントリー希望 - ${parsed.title}`, entryBody, project.id,
   );
 
-  // Update project and create email tracking
-  await ctx.db.batch([
-    ctx.db
-      .prepare(
-        "UPDATE projects SET status = 'draft_created', draft_email_id = ?, updated_at = ? WHERE id = ?"
-      )
-      .bind(draft.id, now, projectId),
-    ctx.db
-      .prepare(
-        "INSERT INTO email_tracking (id, user_id, project_id, gmail_draft_id, type, status, tracking_tag, created_at, updated_at) VALUES (?, ?, ?, ?, 'entry', 'draft', ?, ?, ?)"
-      )
-      .bind(generateId(), user.id, projectId, draft.id, trackingTag, now, now),
-  ]);
-
-  // TODO: Send LINE notification (entry_ok)
+  await ctx.db.update(projects).set({ status: "draft_created", draftEmailId: draft.id, updatedAt: now }).where(eq(projects.id, project.id));
+  await ctx.db.insert(emailTracking).values({
+    userId: user.id,
+    projectId: project.id,
+    gmailDraftId: draft.id,
+    type: "entry",
+    status: "draft",
+    trackingTag: project.id,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
-/**
- * 決定連絡メールを処理（フロー2）
- */
+// ============================================================
+// 決定連絡メール処理 (Flow 2)
+// ============================================================
+
 async function processConfirmationEmail(
   ctx: ProcessingContext,
-  user: UserRecord,
+  user: User,
   accessToken: string,
-  _messageId: string,
   subject: string,
   body: string,
-  _agency: { id: string; name: string }
 ) {
   const now = new Date().toISOString();
 
-  // Try to match with an existing entered project
-  // Use subject/body to find the best match
-  const { results: enteredProjects } = await ctx.db
-    .prepare(
-      "SELECT * FROM projects WHERE user_id = ? AND status = 'entered' ORDER BY created_at DESC"
-    )
-    .bind(user.id)
-    .all<{
-      id: string;
-      title: string;
-      start_date: string;
-      end_date: string;
-      calendar_event_id: string;
-      agency_id: string;
-    }>();
+  const enteredProjects = await ctx.db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.userId, user.id), eq(projects.status, "entered")))
+    .orderBy(desc(projects.createdAt));
 
-  // Simple matching: check if project title appears in the email
-  const matchedProject = enteredProjects.find(
-    (p) => subject.includes(p.title) || body.includes(p.title)
+  const matched = enteredProjects.find(
+    (p) => subject.includes(p.title) || body.includes(p.title),
   );
+  if (!matched) return;
 
-  if (!matchedProject) return;
-
-  // Update project to confirmed
-  if (matchedProject.calendar_event_id) {
-    await updateCalendarEvent(accessToken, matchedProject.calendar_event_id, {
-      summary: matchedProject.title.replace("【仮】", "【確定】"),
-      colorId: "2", // green (sage)
+  if (matched.calendarEventId) {
+    await updateCalendarEvent(accessToken, matched.calendarEventId, {
+      summary: matched.title.replace("【仮】", "【確定】"),
+      colorId: "2",
     });
   }
 
-  await ctx.db
-    .prepare(
-      "UPDATE projects SET status = 'confirmed', updated_at = ? WHERE id = ?"
-    )
-    .bind(now, matchedProject.id)
-    .run();
+  await ctx.db.update(projects).set({ status: "confirmed", updatedAt: now }).where(eq(projects.id, matched.id));
 
-  // Find overlapping tentative projects to decline
-  const { results: tentativeProjects } = await ctx.db
-    .prepare(
-      `SELECT p.*, a.name as agency_name, a.email as agency_email
-       FROM projects p
-       LEFT JOIN agencies a ON p.agency_id = a.id
-       WHERE p.user_id = ? AND p.status = 'entered' AND p.id != ?
-         AND p.start_date <= ? AND p.end_date >= ?`
-    )
-    .bind(
-      user.id,
-      matchedProject.id,
-      matchedProject.end_date,
-      matchedProject.start_date
-    )
-    .all<{
-      id: string;
-      title: string;
-      start_date: string;
-      end_date: string;
-      calendar_event_id: string;
-      agency_email: string;
-    }>();
-
-  // Create decline drafts for each overlapping project
-  for (const project of tentativeProjects) {
-    const trackingTag = generateId();
-    const declineBody = buildDeclineEmailBody(project.title);
-
-    const draft = await createGmailDraft(
-      accessToken,
-      project.agency_email || "",
-      `辞退のご連絡 - ${project.title}`,
-      declineBody,
-      trackingTag
+  // 重複する仮案件に辞退下書きを作成
+  const overlapping = await ctx.db
+    .select({
+      id: projects.id,
+      title: projects.title,
+      calendarEventId: projects.calendarEventId,
+      agencyEmail: agenciesTable.email,
+    })
+    .from(projects)
+    .leftJoin(agenciesTable, eq(projects.agencyId, agenciesTable.id))
+    .where(
+      and(
+        eq(projects.userId, user.id),
+        eq(projects.status, "entered"),
+        ne(projects.id, matched.id),
+        lte(projects.startDate, matched.endDate),
+        gte(projects.endDate, matched.startDate),
+      ),
     );
 
-    await ctx.db.batch([
-      ctx.db
-        .prepare(
-          "UPDATE projects SET status = 'decline_draft', draft_email_id = ?, updated_at = ? WHERE id = ?"
-        )
-        .bind(draft.id, now, project.id),
-      ctx.db
-        .prepare(
-          "INSERT INTO email_tracking (id, user_id, project_id, gmail_draft_id, type, status, tracking_tag, created_at, updated_at) VALUES (?, ?, ?, ?, 'decline', 'draft', ?, ?, ?)"
-        )
-        .bind(
-          generateId(),
-          user.id,
-          project.id,
-          draft.id,
-          trackingTag,
-          now,
-          now
-        ),
-    ]);
-  }
+  for (const proj of overlapping) {
+    const declineBody = buildDeclineEmailBody(proj.title);
+    const draft = await createGmailDraft(
+      accessToken, proj.agencyEmail || "", `辞退のご連絡 - ${proj.title}`, declineBody, proj.id,
+    );
 
-  // TODO: Send LINE notification (confirmed + decline_draft list)
+    await ctx.db.update(projects).set({ status: "decline_draft", draftEmailId: draft.id, updatedAt: now }).where(eq(projects.id, proj.id));
+    await ctx.db.insert(emailTracking).values({
+      userId: user.id,
+      projectId: proj.id,
+      gmailDraftId: draft.id,
+      type: "decline",
+      status: "draft",
+      trackingTag: proj.id,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
 }
 
-/**
- * 送信済みメールを処理（送信検知）
- */
+// ============================================================
+// 送信済みメール検知
+// ============================================================
+
 async function processSentEmail(
   ctx: ProcessingContext,
-  user: UserRecord,
+  user: User,
   accessToken: string,
-  messageId: string
+  messageId: string,
 ) {
   const message = await getGmailMessage(accessToken, messageId);
   const bodyData = extractEmailBody(message.payload);
 
-  // Look for MCia tracking tag
-  const trackingMatch = bodyData.match(
-    /<!-- mcia:tracking_id:([A-Z0-9]+) -->/
-  );
+  const trackingMatch = bodyData.match(/<!-- mcia:tracking_id:([A-Za-z0-9_-]+) -->/);
   if (!trackingMatch) return;
 
-  const trackingTag = trackingMatch[1];
-
-  // Find the tracked email
-  const tracking = await ctx.db
-    .prepare(
-      "SELECT * FROM email_tracking WHERE tracking_tag = ? AND user_id = ?"
-    )
-    .bind(trackingTag, user.id)
-    .first<{
-      id: string;
-      project_id: string;
-      type: string;
-    }>();
-
+  const tag = trackingMatch[1];
+  const tracking = await ctx.db.query.emailTracking.findFirst({
+    where: and(eq(emailTracking.trackingTag, tag), eq(emailTracking.userId, user.id)),
+  });
   if (!tracking) return;
 
   const now = new Date().toISOString();
 
-  // Update tracking status
   await ctx.db
-    .prepare(
-      "UPDATE email_tracking SET status = 'sent', gmail_message_id = ?, updated_at = ? WHERE id = ?"
-    )
-    .bind(messageId, now, tracking.id)
-    .run();
+    .update(emailTracking)
+    .set({ status: "sent", gmailMessageId: messageId, updatedAt: now })
+    .where(eq(emailTracking.id, tracking.id));
 
   if (tracking.type === "entry") {
-    // Entry email was sent → create calendar event
-    const project = await ctx.db
-      .prepare("SELECT * FROM projects WHERE id = ?")
-      .bind(tracking.project_id)
-      .first<{
-        id: string;
-        title: string;
-        start_date: string;
-        end_date: string;
-        agency_id: string;
-      }>();
+    const proj = await ctx.db.query.projects.findFirst({
+      where: eq(projects.id, tracking.projectId),
+    });
+    if (!proj) return;
 
-    if (!project) return;
-
-    const agency = await ctx.db
-      .prepare("SELECT name FROM agencies WHERE id = ?")
-      .bind(project.agency_id)
-      .first<{ name: string }>();
+    const agency = await ctx.db.query.agencies.findFirst({
+      where: eq(agenciesTable.id, proj.agencyId ?? ""),
+      columns: { name: true },
+    });
 
     const calendarEvent = await createCalendarEvent(
       accessToken,
-      `【仮】${project.title} - ${agency?.name || ""}`,
-      project.start_date,
-      project.end_date,
-      `MCia自動登録 | 案件ID: ${project.id}`,
-      "5" // yellow (banana)
+      `【仮】${proj.title} - ${agency?.name || ""}`,
+      proj.startDate,
+      proj.endDate,
+      `MCia自動登録 | 案件ID: ${proj.id}`,
+      "5",
     );
 
     await ctx.db
-      .prepare(
-        "UPDATE projects SET status = 'entered', sent_email_id = ?, calendar_event_id = ?, updated_at = ? WHERE id = ?"
-      )
-      .bind(messageId, calendarEvent.id, now, project.id)
-      .run();
-
-    // TODO: Send LINE notification (entry sent + calendar registered)
+      .update(projects)
+      .set({ status: "entered", sentEmailId: messageId, calendarEventId: calendarEvent.id, updatedAt: now })
+      .where(eq(projects.id, proj.id));
   } else if (tracking.type === "decline") {
-    // Decline email was sent → delete calendar event
-    const project = await ctx.db
-      .prepare("SELECT calendar_event_id FROM projects WHERE id = ?")
-      .bind(tracking.project_id)
-      .first<{ calendar_event_id: string }>();
+    const proj = await ctx.db.query.projects.findFirst({
+      where: eq(projects.id, tracking.projectId),
+      columns: { calendarEventId: true },
+    });
 
-    if (project?.calendar_event_id) {
-      await deleteCalendarEvent(accessToken, project.calendar_event_id);
+    if (proj?.calendarEventId) {
+      await deleteCalendarEvent(accessToken, proj.calendarEventId);
     }
 
     await ctx.db
-      .prepare(
-        "UPDATE projects SET status = 'declined', sent_email_id = ?, calendar_event_id = NULL, updated_at = ? WHERE id = ?"
-      )
-      .bind(messageId, now, tracking.project_id)
-      .run();
-
-    // TODO: Send LINE notification (decline sent + calendar deleted)
+      .update(projects)
+      .set({ status: "declined", sentEmailId: messageId, calendarEventId: null, updatedAt: now })
+      .where(eq(projects.id, tracking.projectId));
   }
 }
 
-// ========== Helper Functions ==========
+// ============================================================
+// Helper Functions
+// ============================================================
 
-function extractEmailBody(payload: Record<string, unknown>): string {
-  // Try to get text/plain or text/html body
+export function extractEmailBody(payload: Record<string, unknown>): string {
   const parts = (payload.parts as Array<Record<string, unknown>>) || [];
 
   if (parts.length === 0 && payload.body) {
@@ -630,7 +476,6 @@ function extractEmailBody(payload: Record<string, unknown>): string {
         return atob(body.data.replace(/-/g, "+").replace(/_/g, "/"));
       }
     }
-    // Recursively check nested parts
     if (part.parts) {
       const nested = extractEmailBody(part as Record<string, unknown>);
       if (nested) return nested;
@@ -640,10 +485,10 @@ function extractEmailBody(payload: Record<string, unknown>): string {
   return "";
 }
 
-function buildEntryEmailBody(
+export function buildEntryEmailBody(
   title: string,
   agencyName: string,
-  prText: string | null
+  prText: string | null,
 ): string {
   let body = `${agencyName} 御中
 
@@ -666,7 +511,7 @@ ${prText}
   return body;
 }
 
-function buildDeclineEmailBody(title: string): string {
+export function buildDeclineEmailBody(title: string): string {
   return `お世話になっております。
 
 下記案件について、誠に恐れ入りますが、別日程にて他決が出たため辞退させていただきたく存じます。

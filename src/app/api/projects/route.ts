@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, and, desc } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { projects, agencies } from "@/db/schema";
+import type { ProjectStatus } from "@/db/schema";
 
-// GET /api/projects - 案件一覧
 export async function GET(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -10,32 +12,40 @@ export async function GET(request: NextRequest) {
   }
 
   const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status");
+  const status = searchParams.get("status") as ProjectStatus | null;
   const agencyId = searchParams.get("agency_id");
-  const limit = parseInt(searchParams.get("limit") || "50", 10);
-  const offset = parseInt(searchParams.get("offset") || "0", 10);
+  const limit = Math.min(parseInt(searchParams.get("limit") || "50", 10), 100);
+  const offset = Math.max(parseInt(searchParams.get("offset") || "0", 10), 0);
 
-  const db = getDB();
-  let query = "SELECT p.*, a.name as agency_name FROM projects p LEFT JOIN agencies a ON p.agency_id = a.id WHERE p.user_id = ?";
-  const bindings: unknown[] = [session.user.id];
+  const db = getDb();
+  const conditions = [eq(projects.userId, session.user.id)];
+  if (status) conditions.push(eq(projects.status, status));
+  if (agencyId) conditions.push(eq(projects.agencyId, agencyId));
 
-  if (status) {
-    query += " AND p.status = ?";
-    bindings.push(status);
-  }
-
-  if (agencyId) {
-    query += " AND p.agency_id = ?";
-    bindings.push(agencyId);
-  }
-
-  query += " ORDER BY p.created_at DESC LIMIT ? OFFSET ?";
-  bindings.push(limit, offset);
-
-  const { results } = await db
-    .prepare(query)
-    .bind(...bindings)
-    .all();
+  const results = await db
+    .select({
+      id: projects.id,
+      userId: projects.userId,
+      agencyId: projects.agencyId,
+      title: projects.title,
+      startDate: projects.startDate,
+      endDate: projects.endDate,
+      location: projects.location,
+      compensation: projects.compensation,
+      genre: projects.genre,
+      requiresPr: projects.requiresPr,
+      status: projects.status,
+      calendarEventId: projects.calendarEventId,
+      createdAt: projects.createdAt,
+      updatedAt: projects.updatedAt,
+      agencyName: agencies.name,
+    })
+    .from(projects)
+    .leftJoin(agencies, eq(projects.agencyId, agencies.id))
+    .where(and(...conditions))
+    .orderBy(desc(projects.createdAt))
+    .limit(limit)
+    .offset(offset);
 
   return NextResponse.json(results);
 }

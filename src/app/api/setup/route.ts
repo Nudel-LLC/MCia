@@ -4,40 +4,12 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 // DB migration SQL statements (from src/db/schema.sql)
 const MIGRATION_STATEMENTS = [
   // Auth.js required tables
-  `CREATE TABLE IF NOT EXISTS accounts (
-    id TEXT PRIMARY KEY,
-    "userId" TEXT NOT NULL,
-    type TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    "providerAccountId" TEXT NOT NULL,
-    refresh_token TEXT,
-    access_token TEXT,
-    expires_at INTEGER,
-    token_type TEXT,
-    scope TEXT,
-    id_token TEXT,
-    session_state TEXT,
-    FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    "sessionToken" TEXT NOT NULL UNIQUE,
-    "userId" TEXT NOT NULL,
-    expires TEXT NOT NULL,
-    FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS verification_tokens (
-    identifier TEXT NOT NULL,
-    token TEXT NOT NULL UNIQUE,
-    expires TEXT NOT NULL,
-    PRIMARY KEY (identifier, token)
-  )`,
   // Users (Auth.js base + MCia extensions)
   `CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT,
     email TEXT UNIQUE,
-    "emailVerified" TEXT,
+    "emailVerified" INTEGER,
     image TEXT,
     line_user_id TEXT,
     stripe_customer_id TEXT,
@@ -56,6 +28,33 @@ const MIGRATION_STATEMENTS = [
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS accounts (
+    "userId" TEXT NOT NULL,
+    type TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    "providerAccountId" TEXT NOT NULL,
+    refresh_token TEXT,
+    access_token TEXT,
+    expires_at INTEGER,
+    token_type TEXT,
+    scope TEXT,
+    id_token TEXT,
+    session_state TEXT,
+    PRIMARY KEY (provider, "providerAccountId"),
+    FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    "sessionToken" TEXT PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    expires INTEGER NOT NULL,
+    FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS verification_tokens (
+    identifier TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires INTEGER NOT NULL,
+    PRIMARY KEY (identifier, token)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_agencies_user_id ON agencies(user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_agencies_email_domain ON agencies(email_domain)`,

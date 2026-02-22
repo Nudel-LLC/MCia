@@ -1,51 +1,50 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, desc } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
-import { generateId } from "@/lib/ulid";
+import { getDb } from "@/lib/db";
+import { agencies } from "@/db/schema";
+import { createAgencySchema } from "@/lib/validators";
 
-// GET /api/agencies - 所属事務所一覧
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const db = getDB();
-  const { results } = await db
-    .prepare("SELECT * FROM agencies WHERE user_id = ? ORDER BY created_at DESC")
-    .bind(session.user.id)
-    .all();
+  const db = getDb();
+  const results = await db
+    .select()
+    .from(agencies)
+    .where(eq(agencies.userId, session.user.id))
+    .orderBy(desc(agencies.createdAt));
 
   return NextResponse.json(results);
 }
 
-// POST /api/agencies - 事務所登録
 export async function POST(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = (await request.json()) as { name: string; email?: string; emailDomain: string };
-  const { name, email, emailDomain } = body;
-
-  if (!name || !emailDomain) {
-    return NextResponse.json(
-      { error: "name and emailDomain are required" },
-      { status: 400 }
-    );
+  const parsed = createAgencySchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const id = generateId();
+  const db = getDb();
   const now = new Date().toISOString();
-  const db = getDB();
+  const [agency] = await db
+    .insert(agencies)
+    .values({
+      userId: session.user.id,
+      name: parsed.data.name,
+      email: parsed.data.email ?? null,
+      emailDomain: parsed.data.emailDomain,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
 
-  await db
-    .prepare(
-      "INSERT INTO agencies (id, user_id, name, email, email_domain, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(id, session.user.id, name, email || null, emailDomain, now, now)
-    .run();
-
-  return NextResponse.json({ id, name, email, emailDomain }, { status: 201 });
+  return NextResponse.json(agency, { status: 201 });
 }

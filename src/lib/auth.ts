@@ -1,11 +1,32 @@
-import NextAuth from "next-auth";
-import type { NextAuthResult } from "next-auth";
-import Google from "next-auth/providers/google";
-import { D1Adapter } from "@auth/d1-adapter";
-import { getCloudflareContext } from "@opennextjs/cloudflare";
-import type { NextRequest } from "next/server";
+/**
+ * Auth.js (NextAuth v5) configuration — Cloudflare Workers + Drizzle ORM
+ *
+ * 設計方針:
+ * ─ `authConfig` はプロバイダ・ページ等の静的設定（ビルド時に安全）
+ * ─ `getNextAuth()` はリクエスト時に D1 バインディングを取得して
+ *   Drizzle adapter 付きのフルインスタンスを生成する遅延ファクトリ
+ * ─ 各 export はこのファクトリ経由で呼び出されるため、
+ *   モジュールスコープで Cloudflare コンテキストに触れない
+ */
 
-// Google OAuth scopes for Gmail + Calendar access
+import NextAuth from "next-auth";
+import type { NextAuthConfig, NextAuthResult } from "next-auth";
+import Google from "next-auth/providers/google";
+import { DrizzleAdapter } from "@auth/drizzle-adapter";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { drizzle } from "drizzle-orm/d1";
+import type { NextRequest } from "next/server";
+import {
+  users,
+  accounts,
+  sessions,
+  verificationTokens,
+} from "@/db/schema";
+
+// ============================================================
+// 静的設定（D1 に依存しない部分）
+// ============================================================
+
 const GOOGLE_SCOPES = [
   "openid",
   "email",
@@ -16,14 +37,46 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ].join(" ");
 
-// Lazy initialization — creates a NextAuth instance using the current request's Cloudflare context.
-// Must NOT be called at module scope (only within request handlers).
+/** ビルド時に評価しても安全な設定部分 */
+const authConfig: Omit<NextAuthConfig, "adapter"> = {
+  providers: [
+    Google({
+      authorization: {
+        params: {
+          scope: GOOGLE_SCOPES,
+          access_type: "offline",
+          prompt: "consent",
+        },
+      },
+    }),
+  ],
+  session: { strategy: "database" },
+  callbacks: {
+    session({ session, user }) {
+      session.user.id = user.id;
+      return session;
+    },
+  },
+  pages: { signIn: "/login" },
+};
+
+// ============================================================
+// リクエスト時ファクトリ
+// ============================================================
+
 async function getNextAuth(): Promise<NextAuthResult> {
   const { env } = await getCloudflareContext({ async: true });
   const cfEnv = env as unknown as CloudflareEnv;
+  const db = drizzle(cfEnv.DB);
 
   return NextAuth({
-    adapter: D1Adapter(cfEnv.DB),
+    ...authConfig,
+    adapter: DrizzleAdapter(db, {
+      usersTable: users,
+      accountsTable: accounts,
+      sessionsTable: sessions,
+      verificationTokensTable: verificationTokens,
+    }),
     providers: [
       Google({
         clientId: cfEnv.AUTH_GOOGLE_ID,
@@ -37,44 +90,32 @@ async function getNextAuth(): Promise<NextAuthResult> {
         },
       }),
     ],
-    session: {
-      strategy: "database",
-    },
-    callbacks: {
-      async session({ session, user }) {
-        session.user.id = user.id;
-        return session;
-      },
-    },
-    pages: {
-      signIn: "/login",
-    },
   });
 }
 
-// Lazy auth — get the current session (used in API routes and server components)
+// ============================================================
+// Public API — ルートハンドラー / Server Components から利用
+// ============================================================
+
 export async function auth() {
-  const { auth: authFn } = await getNextAuth();
-  return authFn();
+  const { auth: fn } = await getNextAuth();
+  return fn();
 }
 
-// Lazy signIn
 export async function signIn(
   ...args: Parameters<NextAuthResult["signIn"]>
 ) {
-  const { signIn: signInFn } = await getNextAuth();
-  return signInFn(...args);
+  const { signIn: fn } = await getNextAuth();
+  return fn(...args);
 }
 
-// Lazy signOut
 export async function signOut(
   ...args: Parameters<NextAuthResult["signOut"]>
 ) {
-  const { signOut: signOutFn } = await getNextAuth();
-  return signOutFn(...args);
+  const { signOut: fn } = await getNextAuth();
+  return fn(...args);
 }
 
-// Auth route handlers for /api/auth/[...nextauth]
 export async function handleAuthGET(request: NextRequest) {
   const { handlers } = await getNextAuth();
   return handlers.GET(request);

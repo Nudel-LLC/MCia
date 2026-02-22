@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, and } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { projects, agencies } from "@/db/schema";
 
-// GET /api/projects/:id - 案件詳細
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -13,14 +14,34 @@ export async function GET(
   }
 
   const { id } = await params;
-  const db = getDB();
+  const db = getDb();
 
-  const project = await db
-    .prepare(
-      "SELECT p.*, a.name as agency_name FROM projects p LEFT JOIN agencies a ON p.agency_id = a.id WHERE p.id = ? AND p.user_id = ?"
-    )
-    .bind(id, session.user.id)
-    .first();
+  const [project] = await db
+    .select({
+      id: projects.id,
+      userId: projects.userId,
+      agencyId: projects.agencyId,
+      title: projects.title,
+      startDate: projects.startDate,
+      endDate: projects.endDate,
+      location: projects.location,
+      compensation: projects.compensation,
+      genre: projects.genre,
+      requiresPr: projects.requiresPr,
+      status: projects.status,
+      sourceEmailId: projects.sourceEmailId,
+      draftEmailId: projects.draftEmailId,
+      sentEmailId: projects.sentEmailId,
+      calendarEventId: projects.calendarEventId,
+      rawEmailBody: projects.rawEmailBody,
+      parsedData: projects.parsedData,
+      createdAt: projects.createdAt,
+      updatedAt: projects.updatedAt,
+      agencyName: agencies.name,
+    })
+    .from(projects)
+    .leftJoin(agencies, eq(projects.agencyId, agencies.id))
+    .where(and(eq(projects.id, id), eq(projects.userId, session.user.id)));
 
   if (!project) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });

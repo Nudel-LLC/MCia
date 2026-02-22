@@ -1,21 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { gmailWebhookSchema } from "@/lib/validators";
 
-// POST /api/webhooks/gmail - Gmail Push Notification受信
 export async function POST(request: NextRequest) {
-  // Verify the request is from Google Pub/Sub
-  const body = (await request.json()) as { message?: { data?: string; messageId?: string; publishTime?: string }; subscription?: string };
-
-  // Pub/Sub sends messages in this format:
-  // { message: { data: base64encoded, messageId, publishTime }, subscription }
-  if (!body.message?.data) {
+  const parsed = gmailWebhookSchema.safeParse(await request.json());
+  if (!parsed.success) {
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
   }
 
-  // Decode the Pub/Sub message
-  const decoded = Buffer.from(body.message.data, "base64").toString("utf-8");
-  const notification = JSON.parse(decoded);
-
-  // notification contains: { emailAddress, historyId }
+  const decoded = Buffer.from(parsed.data.message.data, "base64").toString("utf-8");
+  const notification = JSON.parse(decoded) as { emailAddress?: string; historyId?: string };
   const { emailAddress, historyId } = notification;
 
   if (!emailAddress || !historyId) {
@@ -26,6 +19,5 @@ export async function POST(request: NextRequest) {
   // const { env } = getCloudflareContext();
   // await env.EMAIL_QUEUE.send({ emailAddress, historyId });
 
-  // Acknowledge immediately (Pub/Sub expects 2xx within 10s)
   return NextResponse.json({ success: true });
 }

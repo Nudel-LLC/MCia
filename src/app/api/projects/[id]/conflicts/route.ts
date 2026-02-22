@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, and, ne, lte, gte, notInArray } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { projects, agencies } from "@/db/schema";
 
-// GET /api/projects/:id/conflicts - 重複案件確認
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -13,33 +14,38 @@ export async function GET(
   }
 
   const { id } = await params;
-  const db = getDB();
+  const db = getDb();
 
-  // Get the target project
-  const project = await db
-    .prepare("SELECT * FROM projects WHERE id = ? AND user_id = ?")
-    .bind(id, session.user.id)
-    .first<{ start_date: string; end_date: string }>();
+  const project = await db.query.projects.findFirst({
+    where: and(eq(projects.id, id), eq(projects.userId, session.user.id)),
+    columns: { startDate: true, endDate: true },
+  });
 
   if (!project) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  // Find overlapping projects (date ranges overlap when start_a <= end_b AND end_a >= start_b)
-  const { results } = await db
-    .prepare(
-      `SELECT p.*, a.name as agency_name
-       FROM projects p
-       LEFT JOIN agencies a ON p.agency_id = a.id
-       WHERE p.user_id = ?
-         AND p.id != ?
-         AND p.status NOT IN ('declined', 'expired')
-         AND p.start_date <= ?
-         AND p.end_date >= ?
-       ORDER BY p.start_date`
+  const results = await db
+    .select({
+      id: projects.id,
+      title: projects.title,
+      startDate: projects.startDate,
+      endDate: projects.endDate,
+      status: projects.status,
+      agencyName: agencies.name,
+    })
+    .from(projects)
+    .leftJoin(agencies, eq(projects.agencyId, agencies.id))
+    .where(
+      and(
+        eq(projects.userId, session.user.id),
+        ne(projects.id, id),
+        notInArray(projects.status, ["declined", "expired"]),
+        lte(projects.startDate, project.endDate),
+        gte(projects.endDate, project.startDate)
+      )
     )
-    .bind(session.user.id, id, project.end_date, project.start_date)
-    .all();
+    .orderBy(projects.startDate);
 
   return NextResponse.json(results);
 }

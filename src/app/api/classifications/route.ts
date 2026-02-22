@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, desc } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { emailClassifications } from "@/db/schema";
+import { paginationSchema } from "@/lib/validators";
 
-// GET /api/classifications - 分類履歴一覧
 export async function GET(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -10,16 +12,19 @@ export async function GET(request: NextRequest) {
   }
 
   const { searchParams } = new URL(request.url);
-  const limit = parseInt(searchParams.get("limit") || "50", 10);
-  const offset = parseInt(searchParams.get("offset") || "0", 10);
+  const { limit, offset } = paginationSchema.parse({
+    limit: searchParams.get("limit"),
+    offset: searchParams.get("offset"),
+  });
 
-  const db = getDB();
-  const { results } = await db
-    .prepare(
-      "SELECT * FROM email_classifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    )
-    .bind(session.user.id, limit, offset)
-    .all();
+  const db = getDb();
+  const results = await db
+    .select()
+    .from(emailClassifications)
+    .where(eq(emailClassifications.userId, session.user.id))
+    .orderBy(desc(emailClassifications.createdAt))
+    .limit(limit)
+    .offset(offset);
 
   return NextResponse.json(results);
 }

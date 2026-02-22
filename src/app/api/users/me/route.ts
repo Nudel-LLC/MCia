@@ -1,21 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { users } from "@/db/schema";
+import { updateUserSchema } from "@/lib/validators";
 
-// GET /api/users/me - ユーザー情報取得
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const db = getDB();
-  const user = await db
-    .prepare(
-      "SELECT id, name, email, line_user_id, stripe_customer_id, subscription_status, gmail_history_id, created_at FROM users WHERE id = ?"
-    )
-    .bind(session.user.id)
-    .first();
+  const db = getDb();
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, session.user.id),
+    columns: {
+      id: true,
+      name: true,
+      email: true,
+      lineUserId: true,
+      stripeCustomerId: true,
+      subscriptionStatus: true,
+      gmailHistoryId: true,
+      createdAt: true,
+    },
+  });
 
   if (!user) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -24,22 +33,22 @@ export async function GET() {
   return NextResponse.json(user);
 }
 
-// PUT /api/users/me - ユーザー情報更新
 export async function PUT(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = (await request.json()) as { name: string };
-  const { name } = body;
-  const now = new Date().toISOString();
-  const db = getDB();
+  const parsed = updateUserSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  }
 
+  const db = getDb();
   await db
-    .prepare("UPDATE users SET name = ?, updated_at = ? WHERE id = ?")
-    .bind(name, now, session.user.id)
-    .run();
+    .update(users)
+    .set({ name: parsed.data.name, updatedAt: new Date().toISOString() })
+    .where(eq(users.id, session.user.id));
 
   return NextResponse.json({ success: true });
 }

@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, and } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { agencies } from "@/db/schema";
+import { updateAgencySchema } from "@/lib/validators";
 
-// PUT /api/agencies/:id - 事務所情報更新
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -13,26 +15,30 @@ export async function PUT(
   }
 
   const { id } = await params;
-  const body = (await request.json()) as { name: string; email?: string; emailDomain: string };
-  const { name, email, emailDomain } = body;
-  const now = new Date().toISOString();
-  const db = getDB();
+  const parsed = updateAgencySchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  }
 
-  const result = await db
-    .prepare(
-      "UPDATE agencies SET name = ?, email = ?, email_domain = ?, updated_at = ? WHERE id = ? AND user_id = ?"
-    )
-    .bind(name, email || null, emailDomain, now, id, session.user.id)
-    .run();
+  const db = getDb();
+  const updated = await db
+    .update(agencies)
+    .set({
+      name: parsed.data.name,
+      email: parsed.data.email ?? null,
+      emailDomain: parsed.data.emailDomain,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(and(eq(agencies.id, id), eq(agencies.userId, session.user.id)))
+    .returning();
 
-  if (!result.meta.changes) {
+  if (updated.length === 0) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return NextResponse.json({ id, name, email, emailDomain });
+  return NextResponse.json(updated[0]);
 }
 
-// DELETE /api/agencies/:id - 事務所削除
 export async function DELETE(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -43,14 +49,13 @@ export async function DELETE(
   }
 
   const { id } = await params;
-  const db = getDB();
+  const db = getDb();
+  const deleted = await db
+    .delete(agencies)
+    .where(and(eq(agencies.id, id), eq(agencies.userId, session.user.id)))
+    .returning();
 
-  const result = await db
-    .prepare("DELETE FROM agencies WHERE id = ? AND user_id = ?")
-    .bind(id, session.user.id)
-    .run();
-
-  if (!result.meta.changes) {
+  if (deleted.length === 0) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 

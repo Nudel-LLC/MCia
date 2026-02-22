@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, and } from "drizzle-orm";
 import { auth } from "@/lib/auth";
-import { getDB } from "@/lib/db";
+import { getDb } from "@/lib/db";
+import { emailClassifications } from "@/db/schema";
+import { updateClassificationSchema } from "@/lib/validators";
 
-// PUT /api/classifications/:id - 分類結果の手動修正
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -13,28 +15,26 @@ export async function PUT(
   }
 
   const { id } = await params;
-  const body = (await request.json()) as { category: string };
-  const { category } = body;
-
-  const validCategories = ["recruitment", "confirmation", "decline_ack", "other"];
-  if (!category || !validCategories.includes(category)) {
-    return NextResponse.json(
-      { error: `Invalid category. Must be one of: ${validCategories.join(", ")}` },
-      { status: 400 }
-    );
+  const parsed = updateClassificationSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const db = getDB();
-  const result = await db
-    .prepare(
-      "UPDATE email_classifications SET category = ?, confidence = 1.0 WHERE id = ? AND user_id = ?"
+  const db = getDb();
+  const updated = await db
+    .update(emailClassifications)
+    .set({ category: parsed.data.category, confidence: 1.0 })
+    .where(
+      and(
+        eq(emailClassifications.id, id),
+        eq(emailClassifications.userId, session.user.id)
+      )
     )
-    .bind(category, id, session.user.id)
-    .run();
+    .returning({ id: emailClassifications.id, category: emailClassifications.category });
 
-  if (!result.meta.changes) {
+  if (updated.length === 0) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return NextResponse.json({ id, category });
+  return NextResponse.json(updated[0]);
 }
