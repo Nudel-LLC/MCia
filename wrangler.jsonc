@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": ".open-next/worker.js",
+  "name": "mcia",
+  "compatibility_date": "2025-05-05",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+
+  // MCia application database
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mcia-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+      // TODO: Replace database_id after running: wrangler d1 create mcia-db
+    }
+  ],
+
+  // Session management
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "00000000000000000000000000000000"
+      // TODO: Replace id after running: wrangler kv namespace create KV
+    }
+  ],
+
+  // Async job processing (email parsing, etc.)
+  "queues": {
+    "producers": [
+      {
+        "binding": "EMAIL_QUEUE",
+        "queue": "email-processing"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "email-processing",
+        "max_batch_size": 10
+      }
+    ]
+  }
+}
