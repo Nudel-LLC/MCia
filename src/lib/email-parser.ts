@@ -60,7 +60,7 @@ export async function parseProjectEmail(
     throw new Error(`Parsing API error: ${response.status}`);
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as { content: Array<{ text: string }> };
   const text = data.content[0].text;
 
   const jsonMatch = text.match(/\{[\s\S]*\}/);

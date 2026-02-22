@@ -73,6 +73,6 @@ ${pastProjectsText}`,
     throw new Error(`PR generation API error: ${response.status}`);
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as { content: Array<{ text: string }> };
   return data.content[0].text;
 }

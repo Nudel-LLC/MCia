@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
 
   // TODO: Verify LINE signature with LINE_CHANNEL_SECRET
 
-  const body = await request.json();
+  const body = (await request.json()) as { events?: Array<{ type: string; source: { userId: string } }> };
   const events = body.events || [];
   const db = getDB();
 

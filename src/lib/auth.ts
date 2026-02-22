@@ -1,7 +1,9 @@
 import NextAuth from "next-auth";
+import type { NextAuthResult } from "next-auth";
 import Google from "next-auth/providers/google";
 import { D1Adapter } from "@auth/d1-adapter";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import type { NextRequest } from "next/server";
 
 // Google OAuth scopes for Gmail + Calendar access
 const GOOGLE_SCOPES = [
@@ -14,11 +16,13 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ].join(" ");
 
-export const { handlers, auth, signIn, signOut } = NextAuth(() => {
-  const { env } = getCloudflareContext();
+// Lazy initialization — creates a NextAuth instance using the current request's Cloudflare context.
+// Must NOT be called at module scope (only within request handlers).
+async function getNextAuth(): Promise<NextAuthResult> {
+  const { env } = await getCloudflareContext({ async: true });
   const cfEnv = env as unknown as CloudflareEnv;
 
-  return {
+  return NextAuth({
     adapter: D1Adapter(cfEnv.DB),
     providers: [
       Google({
@@ -45,5 +49,38 @@ export const { handlers, auth, signIn, signOut } = NextAuth(() => {
     pages: {
       signIn: "/login",
     },
-  };
-});
+  });
+}
+
+// Lazy auth — get the current session (used in API routes and server components)
+export async function auth() {
+  const { auth: authFn } = await getNextAuth();
+  return authFn();
+}
+
+// Lazy signIn
+export async function signIn(
+  ...args: Parameters<NextAuthResult["signIn"]>
+) {
+  const { signIn: signInFn } = await getNextAuth();
+  return signInFn(...args);
+}
+
+// Lazy signOut
+export async function signOut(
+  ...args: Parameters<NextAuthResult["signOut"]>
+) {
+  const { signOut: signOutFn } = await getNextAuth();
+  return signOutFn(...args);
+}
+
+// Auth route handlers for /api/auth/[...nextauth]
+export async function handleAuthGET(request: NextRequest) {
+  const { handlers } = await getNextAuth();
+  return handlers.GET(request);
+}
+
+export async function handleAuthPOST(request: NextRequest) {
+  const { handlers } = await getNextAuth();
+  return handlers.POST(request);
+}

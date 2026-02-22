@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
 
   // TODO: Verify Stripe signature with STRIPE_WEBHOOK_SECRET
 
-  const body = await request.json();
+  const body = (await request.json()) as { type: string; data: { object: { status: string; customer: string } } };
   const { type, data } = body;
 
   const db = getDB();

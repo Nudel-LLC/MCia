@@ -31,7 +31,7 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
+  const body = (await request.json()) as { name: string };
   const { name } = body;
   const now = new Date().toISOString();
   const db = getDB();

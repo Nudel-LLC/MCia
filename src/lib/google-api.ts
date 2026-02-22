@@ -7,11 +7,12 @@ const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const CALENDAR_BASE =
   "https://www.googleapis.com/calendar/v3/calendars/primary";
 
-async function googleFetch(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function googleFetch<T = any>(
   url: string,
   accessToken: string,
   options: RequestInit = {}
-) {
+): Promise<T> {
   const response = await fetch(url, {
     ...options,
     headers: {
@@ -26,7 +27,7 @@ async function googleFetch(
     throw new Error(`Google API error (${response.status}): ${error}`);
   }
 
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
 // ========== Gmail API ==========
@@ -212,5 +213,5 @@ export async function refreshAccessToken(
     throw new Error(`Token refresh failed: ${response.status}`);
   }
 
-  return response.json();
+  return response.json() as Promise<{ access_token: string; expires_in: number }>;
 }

@@ -23,7 +23,7 @@ export async function PUT(
   }
 
   const { id } = await params;
-  const body = await request.json();
+  const body = (await request.json()) as { status: string };
   const { status } = body;
 
   if (!status || !VALID_STATUSES.includes(status)) {

@@ -13,7 +13,7 @@ export async function PUT(
   }
 
   const { id } = await params;
-  const body = await request.json();
+  const body = (await request.json()) as { category: string };
   const { category } = body;
 
   const validCategories = ["recruitment", "confirmation", "decline_ack", "other"];

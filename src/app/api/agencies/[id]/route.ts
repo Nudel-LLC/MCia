@@ -13,7 +13,7 @@ export async function PUT(
   }
 
   const { id } = await params;
-  const body = await request.json();
+  const body = (await request.json()) as { name: string; email?: string; emailDomain: string };
   const { name, email, emailDomain } = body;
   const now = new Date().toISOString();
   const db = getDB();

@@ -51,7 +51,7 @@ export async function classifyEmail(
     throw new Error(`Classification API error: ${response.status}`);
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as { content: Array<{ text: string }> };
   const text = data.content[0].text;
 
   // Extract JSON from response

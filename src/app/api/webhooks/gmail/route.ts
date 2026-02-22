@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 // POST /api/webhooks/gmail - Gmail Push Notification受信
 export async function POST(request: NextRequest) {
   // Verify the request is from Google Pub/Sub
-  const body = await request.json();
+  const body = (await request.json()) as { message?: { data?: string; messageId?: string; publishTime?: string }; subscription?: string };
 
   // Pub/Sub sends messages in this format:
   // { message: { data: base64encoded, messageId, publishTime }, subscription }
