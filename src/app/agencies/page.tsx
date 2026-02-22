@@ -1,39 +1,84 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface Agency {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   emailDomain: string;
 }
 
 export default function AgenciesPage() {
   const [agencies, setAgencies] = useState<Agency[]>([]);
+  const [loading, setLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
-  function handleAdd() {
-    if (!name || !email) return;
-    const domain = email.includes("@") ? email.split("@")[1] : email;
-    const newAgency: Agency = {
-      id: crypto.randomUUID(),
-      name,
-      email,
-      emailDomain: domain,
-    };
-    setAgencies([...agencies, newAgency]);
-    setName("");
-    setEmail("");
-    setIsAdding(false);
-    // TODO: POST /api/agencies
+  useEffect(() => {
+    fetchAgencies();
+  }, []);
+
+  async function fetchAgencies() {
+    try {
+      const res = await fetch("/api/agencies");
+      if (res.ok) {
+        setAgencies(await res.json());
+      }
+    } catch {
+      // API may not be available yet
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function handleDelete(id: string) {
-    setAgencies(agencies.filter((a) => a.id !== id));
-    // TODO: DELETE /api/agencies/:id
+  async function handleAdd() {
+    if (!name) return;
+    const domain = email.includes("@") ? email.split("@")[1] : email;
+    if (!domain) return;
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const res = await fetch("/api/agencies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          email: email.includes("@") ? email : undefined,
+          emailDomain: domain,
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: { fieldErrors?: { emailDomain?: string[] } } };
+        setError(data.error?.fieldErrors?.emailDomain?.[0] || "登録に失敗しました");
+        return;
+      }
+      const agency = (await res.json()) as Agency;
+      setAgencies([agency, ...agencies]);
+      setName("");
+      setEmail("");
+      setIsAdding(false);
+    } catch {
+      setError("ネットワークエラーが発生しました");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm("この事務所を削除しますか？")) return;
+    try {
+      const res = await fetch(`/api/agencies/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setAgencies(agencies.filter((a) => a.id !== id));
+      }
+    } catch {
+      // silent fail
+    }
   }
 
   return (
@@ -52,11 +97,12 @@ export default function AgenciesPage() {
       {isAdding && (
         <div className="bg-white rounded-xl border border-border p-6 mb-6">
           <h2 className="font-semibold mb-4">新しい事務所を追加</h2>
+          {error && (
+            <p className="text-sm text-danger mb-4">{error}</p>
+          )}
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1">
-                事務所名
-              </label>
+              <label className="block text-sm font-medium mb-1">事務所名</label>
               <input
                 type="text"
                 value={name}
@@ -83,15 +129,17 @@ export default function AgenciesPage() {
             <div className="flex gap-2">
               <button
                 onClick={handleAdd}
-                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover text-sm"
+                disabled={submitting}
+                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover text-sm disabled:opacity-50"
               >
-                追加
+                {submitting ? "追加中..." : "追加"}
               </button>
               <button
                 onClick={() => {
                   setIsAdding(false);
                   setName("");
                   setEmail("");
+                  setError("");
                 }}
                 className="px-4 py-2 border border-border rounded-lg hover:bg-muted text-sm"
               >
@@ -103,7 +151,11 @@ export default function AgenciesPage() {
       )}
 
       {/* Agency list */}
-      {agencies.length === 0 && !isAdding ? (
+      {loading ? (
+        <div className="bg-white rounded-xl border border-border p-12 text-center">
+          <p className="text-muted-foreground">読み込み中...</p>
+        </div>
+      ) : agencies.length === 0 && !isAdding ? (
         <div className="bg-white rounded-xl border border-border p-12 text-center">
           <p className="text-muted-foreground mb-4">
             まだ事務所が登録されていません

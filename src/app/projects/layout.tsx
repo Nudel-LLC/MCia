@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/app-shell";
 
-export default function DashboardLayout({
+export default function ProjectsLayout({
   children,
 }: {
   children: React.ReactNode;
