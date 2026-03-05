@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { gmailWebhookSchema } from "@/lib/validators";
+import { getDbAsync, getEnvAsync } from "@/lib/db";
+import { processGmailNotification, type ProcessingContext } from "@/lib/email-processor";
 
 export async function POST(request: NextRequest) {
   const parsed = gmailWebhookSchema.safeParse(await request.json());
@@ -15,9 +17,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid notification" }, { status: 400 });
   }
 
-  // TODO: Queue the email processing job
-  // const { env } = getCloudflareContext();
-  // await env.EMAIL_QUEUE.send({ emailAddress, historyId });
+  const [db, env] = await Promise.all([getDbAsync(), getEnvAsync()]);
+
+  const ctx: ProcessingContext = {
+    db,
+    apiKey: env.ANTHROPIC_API_KEY,
+    googleClientId: env.AUTH_GOOGLE_ID,
+    googleClientSecret: env.AUTH_GOOGLE_SECRET,
+  };
+
+  await processGmailNotification(ctx, emailAddress, historyId);
 
   return NextResponse.json({ success: true });
 }

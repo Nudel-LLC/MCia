@@ -28,3 +28,9 @@ export function getEnv(): CloudflareEnv {
   const { env } = getCloudflareContext();
   return env as unknown as CloudflareEnv;
 }
+
+/** async 版 — 環境変数の非同期取得 */
+export async function getEnvAsync(): Promise<CloudflareEnv> {
+  const { env } = await getCloudflareContext({ async: true });
+  return env as unknown as CloudflareEnv;
+}

@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { drizzle } from "drizzle-orm/d1";
+import { eq, and } from "drizzle-orm";
+import * as schema from "@/db/schema";
+import { setupGmailWatch, refreshAccessToken } from "@/lib/google-api";
 
 // DB migration SQL statements (from src/db/schema.sql)
 const MIGRATION_STATEMENTS = [
@@ -192,5 +196,75 @@ export async function GET() {
       { success: false, error: msg },
       { status: 500 }
     );
+  }
+}
+
+// POST /api/setup - Set up Gmail Watch for a user
+// Registers Gmail push notifications via Google Pub/Sub.
+// Body: { userId: string }
+export async function POST(request: Request) {
+  try {
+    const { env } = await getCloudflareContext();
+    const cfEnv = env as unknown as CloudflareEnv;
+    const db = drizzle(cfEnv.DB, { schema });
+
+    const body = await request.json() as { userId?: string };
+    if (!body.userId) {
+      return NextResponse.json({ error: "userId required" }, { status: 400 });
+    }
+
+    const account = await db.query.accounts.findFirst({
+      where: and(
+        eq(schema.accounts.userId, body.userId),
+        eq(schema.accounts.provider, "google"),
+      ),
+    });
+
+    if (!account?.refresh_token) {
+      return NextResponse.json({ error: "No Google account linked" }, { status: 400 });
+    }
+
+    // Refresh access token
+    const refreshed = await refreshAccessToken(
+      cfEnv.AUTH_GOOGLE_ID,
+      cfEnv.AUTH_GOOGLE_SECRET,
+      account.refresh_token,
+    );
+
+    // Update stored token
+    await db
+      .update(schema.accounts)
+      .set({
+        access_token: refreshed.access_token,
+        expires_at: Math.floor(Date.now() / 1000) + refreshed.expires_in,
+      })
+      .where(
+        and(
+          eq(schema.accounts.userId, body.userId),
+          eq(schema.accounts.provider, "google"),
+        ),
+      );
+
+    // Set up Gmail Watch
+    const topicName = `projects/${cfEnv.GOOGLE_CLOUD_PROJECT_ID}/topics/gmail-notifications`;
+    const watchResult = await setupGmailWatch(refreshed.access_token, topicName);
+
+    // Store initial historyId
+    await db
+      .update(schema.users)
+      .set({
+        gmailHistoryId: watchResult.historyId,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.users.id, body.userId));
+
+    return NextResponse.json({
+      success: true,
+      historyId: watchResult.historyId,
+      expiration: watchResult.expiration,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
