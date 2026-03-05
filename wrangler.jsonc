@@ -17,32 +17,9 @@
     {
       "binding": "DB",
       "database_name": "mcia-db",
-      "database_id": "217b477b-0ac8-c3a2-8039-98b7fa11066c"
+      "database_id": "17f7f286-07d2-4e42-8b92-8a0fb8641f1b"
     }
   ],
 
-  // Session management
-  "kv_namespaces": [
-    {
-      "binding": "KV",
-      "id": "00000000000000000000000000000000"
-      // TODO: Replace id after running: wrangler kv namespace create KV
-    }
-  ],
-
-  // Async job processing (email parsing, etc.)
-  "queues": {
-    "producers": [
-      {
-        "binding": "EMAIL_QUEUE",
-        "queue": "email-processing"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "email-processing",
-        "max_batch_size": 10
-      }
-    ]
-  }
+  // KV and Queues will be added when needed
 }
