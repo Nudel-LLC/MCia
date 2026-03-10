@@ -10,6 +10,8 @@ interface UserProfile {
 export default function SubscriptionPage() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [portalLoading, setPortalLoading] = useState(false);
 
   useEffect(() => {
     async function fetchUser() {
@@ -29,6 +31,36 @@ export default function SubscriptionPage() {
 
   const isActive = user?.subscriptionStatus === "active";
   const isTrial = user?.subscriptionStatus === "trial";
+
+  async function handleCheckout() {
+    setCheckoutLoading(true);
+    try {
+      const res = await fetch("/api/stripe/checkout", { method: "POST" });
+      const { url } = (await res.json()) as { url?: string };
+      if (url) {
+        window.location.href = url;
+      }
+    } catch {
+      alert("決済ページの作成に失敗しました。");
+    } finally {
+      setCheckoutLoading(false);
+    }
+  }
+
+  async function handlePortal() {
+    setPortalLoading(true);
+    try {
+      const res = await fetch("/api/stripe/portal", { method: "POST" });
+      const { url } = (await res.json()) as { url?: string };
+      if (url) {
+        window.location.href = url;
+      }
+    } catch {
+      alert("ポータルの作成に失敗しました。");
+    } finally {
+      setPortalLoading(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -91,13 +123,11 @@ export default function SubscriptionPage() {
           </ul>
           {!isActive && (
             <button
-              onClick={() => {
-                // TODO: Stripe checkout session creation
-                alert("Stripe決済連携は準備中です");
-              }}
-              className="w-full py-3 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors font-medium"
+              onClick={handleCheckout}
+              disabled={checkoutLoading}
+              className="w-full py-3 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors font-medium disabled:opacity-50"
             >
-              プランに加入する
+              {checkoutLoading ? "処理中..." : "プランに加入する"}
             </button>
           )}
         </div>
@@ -110,13 +140,11 @@ export default function SubscriptionPage() {
             プランの変更や解約はStripeのカスタマーポータルから行えます。
           </p>
           <button
-            onClick={() => {
-              // TODO: Stripe customer portal redirect
-              alert("Stripeカスタマーポータルは準備中です");
-            }}
-            className="px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors text-sm"
+            onClick={handlePortal}
+            disabled={portalLoading}
+            className="px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors text-sm disabled:opacity-50"
           >
-            プランを管理する
+            {portalLoading ? "処理中..." : "プランを管理する"}
           </button>
         </div>
       )}

@@ -1,8 +1,44 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 
 export default function LoginPage() {
+  const [loading, setLoading] = useState(false);
+
+  function handleLogin() {
+    setLoading(true);
+    // Auth.js の signIn エンドポイントに直接遷移
+    // server action ではなく CSR から呼ぶためフォーム POST を使う
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/api/auth/signin/google";
+
+    const callbackInput = document.createElement("input");
+    callbackInput.type = "hidden";
+    callbackInput.name = "callbackUrl";
+    callbackInput.value = "/dashboard";
+    form.appendChild(callbackInput);
+
+    // Auth.js requires CSRF token — fetch it first
+    fetch("/api/auth/csrf")
+      .then((res) => res.json())
+      .then((data) => {
+        const { csrfToken } = data as { csrfToken: string };
+        const csrfInput = document.createElement("input");
+        csrfInput.type = "hidden";
+        csrfInput.name = "csrfToken";
+        csrfInput.value = csrfToken;
+        form.appendChild(csrfInput);
+        document.body.appendChild(form);
+        form.submit();
+      })
+      .catch(() => {
+        // Fallback: redirect to Auth.js signin page
+        window.location.href = "/api/auth/signin?callbackUrl=/dashboard";
+      });
+  }
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-muted">
       <div className="w-full max-w-sm">
@@ -19,11 +55,9 @@ export default function LoginPage() {
           <h2 className="text-xl font-semibold text-center mb-6">ログイン</h2>
 
           <button
-            onClick={() => {
-              // TODO: Auth.js signIn("google") を呼び出し
-              window.location.href = "/api/auth/signin?callbackUrl=/dashboard";
-            }}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 border border-border rounded-lg hover:bg-muted transition-colors"
+            onClick={handleLogin}
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-3 px-4 py-3 border border-border rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24">
               <path
@@ -43,7 +77,9 @@ export default function LoginPage() {
                 d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
               />
             </svg>
-            <span className="font-medium">Googleアカウントでログイン</span>
+            <span className="font-medium">
+              {loading ? "ログイン中..." : "Googleアカウントでログイン"}
+            </span>
           </button>
 
           <p className="text-xs text-muted-foreground text-center mt-6">
