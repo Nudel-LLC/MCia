@@ -85,6 +85,17 @@ export const lineWebhookSchema = z.object({
         source: z.object({
           userId: z.string(),
         }),
+        postback: z
+          .object({
+            data: z.string(),
+          })
+          .optional(),
+        link: z
+          .object({
+            result: z.string(),
+            nonce: z.string(),
+          })
+          .optional(),
       })
     )
     .default([]),

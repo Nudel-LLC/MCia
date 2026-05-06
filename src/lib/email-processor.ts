@@ -34,6 +34,18 @@ import {
   deleteCalendarEvent,
   refreshAccessToken,
 } from "./google-api";
+import {
+  sendNotification,
+  sendConfirmNotification,
+  formatEntryOkMessage,
+  formatEntryNgMessage,
+  formatConfirmedMessage,
+  formatDeclineSentMessage,
+  formatEntrySentMessage,
+  formatUncertainMessage,
+  formatMcRelatedConfirmMessage,
+  type NotifyContext,
+} from "./line-notify";
 
 /** パイプラインに必要な外部コンテキスト */
 export interface ProcessingContext {
@@ -41,6 +53,7 @@ export interface ProcessingContext {
   apiKey: string;
   googleClientId: string;
   googleClientSecret: string;
+  lineChannelAccessToken: string;
 }
 
 // ============================================================
@@ -163,6 +176,15 @@ async function processIncomingEmail(
     })
     .returning({ id: emailClassifications.id });
 
+  const nCtx: NotifyContext = { db: ctx.db, lineChannelAccessToken: ctx.lineChannelAccessToken };
+
+  if (classification.confidence < 0.7) {
+    await sendNotification(
+      nCtx, user.id, "classification_uncertain",
+      formatUncertainMessage(subject, classification.confidence),
+    );
+  }
+
   if (classification.category === "recruitment") {
     await processRecruitmentEmail(ctx, user, accessToken, messageId, subject, bodyData, agency);
   } else if (classification.category === "confirmation") {
@@ -255,8 +277,26 @@ async function processRecruitmentEmail(
     parsed.startDate, parsed.endDate, calendarEvents, mciaEventIds, mciaProjectMap, agencyNames,
   );
 
+  const nCtx: NotifyContext = { db: ctx.db, lineChannelAccessToken: ctx.lineChannelAccessToken };
+
   if (conflict.conflictType === "confirmed_block") {
     await ctx.db.update(projects).set({ status: "expired", updatedAt: now }).where(eq(projects.id, project.id));
+    const blockingEvent = conflict.conflictingEvents[0]?.event;
+    await sendNotification(
+      nCtx, user.id, "entry_ng",
+      formatEntryNgMessage(parsed.title, parsed.startDate, parsed.endDate, blockingEvent?.summary || "確定案件"),
+      project.id,
+    );
+    return;
+  }
+
+  if (conflict.conflictType === "mc_related_confirm") {
+    const relatedEvent = conflict.conflictingEvents[0]?.event;
+    await sendConfirmNotification(
+      nCtx, user.id, "entry_ok",
+      formatMcRelatedConfirmMessage(parsed.title, parsed.startDate, parsed.endDate, relatedEvent?.summary || ""),
+      { projectId: project.id, action: "entry_confirm" },
+    );
     return;
   }
 
@@ -309,6 +349,12 @@ async function processRecruitmentEmail(
     createdAt: now,
     updatedAt: now,
   });
+
+  await sendNotification(
+    nCtx, user.id, "entry_ok",
+    formatEntryOkMessage(parsed.title, parsed.startDate, parsed.endDate),
+    project.id,
+  );
 }
 
 // ============================================================
@@ -343,6 +389,8 @@ async function processConfirmationEmail(
   }
 
   await ctx.db.update(projects).set({ status: "confirmed", updatedAt: now }).where(eq(projects.id, matched.id));
+
+  const nCtx: NotifyContext = { db: ctx.db, lineChannelAccessToken: ctx.lineChannelAccessToken };
 
   // 重複する仮案件に辞退下書きを作成
   const overlapping = await ctx.db
@@ -382,6 +430,25 @@ async function processConfirmationEmail(
       updatedAt: now,
     });
   }
+
+  const overlappingForNotify = await ctx.db
+    .select({ title: projects.title, startDate: projects.startDate, endDate: projects.endDate })
+    .from(projects)
+    .where(
+      and(
+        eq(projects.userId, user.id),
+        eq(projects.status, "decline_draft"),
+        ne(projects.id, matched.id),
+        lte(projects.startDate, matched.endDate),
+        gte(projects.endDate, matched.startDate),
+      ),
+    );
+
+  await sendNotification(
+    nCtx, user.id, "confirmed",
+    formatConfirmedMessage(matched.title, overlappingForNotify),
+    matched.id,
+  );
 }
 
 // ============================================================
@@ -437,10 +504,17 @@ async function processSentEmail(
       .update(projects)
       .set({ status: "entered", sentEmailId: messageId, calendarEventId: calendarEvent.id, updatedAt: now })
       .where(eq(projects.id, proj.id));
+
+    const nCtx: NotifyContext = { db: ctx.db, lineChannelAccessToken: ctx.lineChannelAccessToken };
+    await sendNotification(
+      nCtx, user.id, "entry_ok",
+      formatEntrySentMessage(proj.title, agency?.name || ""),
+      proj.id,
+    );
   } else if (tracking.type === "decline") {
     const proj = await ctx.db.query.projects.findFirst({
       where: eq(projects.id, tracking.projectId),
-      columns: { calendarEventId: true },
+      columns: { id: true, title: true, calendarEventId: true },
     });
 
     if (proj?.calendarEventId) {
@@ -451,6 +525,13 @@ async function processSentEmail(
       .update(projects)
       .set({ status: "declined", sentEmailId: messageId, calendarEventId: null, updatedAt: now })
       .where(eq(projects.id, tracking.projectId));
+
+    const nCtx: NotifyContext = { db: ctx.db, lineChannelAccessToken: ctx.lineChannelAccessToken };
+    await sendNotification(
+      nCtx, user.id, "decline_sent",
+      formatDeclineSentMessage(proj?.title || ""),
+      tracking.projectId,
+    );
   }
 }
 

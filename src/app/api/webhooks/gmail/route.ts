@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
     apiKey: env.ANTHROPIC_API_KEY,
     googleClientId: env.AUTH_GOOGLE_ID,
     googleClientSecret: env.AUTH_GOOGLE_SECRET,
+    lineChannelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
   };
 
   await processGmailNotification(ctx, emailAddress, historyId);
